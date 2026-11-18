@@ -33,6 +33,11 @@ class TestWebsocket < Minitest::Test
     [socket, request]
   end
 
+  # Queue#pop takes a timeout only from Ruby 3.2 on.
+  def wait_for(queue)
+    Timeout.timeout(5) { queue.pop }
+  end
+
   def text_frame(data)
     WebSocket::Frame::Outgoing::Server.new(version: @protocol_version, data: data, type: :text).to_s
   end
@@ -46,12 +51,12 @@ class TestWebsocket < Minitest::Test
     @client.connect_websocket
     socket, request = server.value
 
-    assert opened.pop(timeout: 5)
+    assert wait_for(opened)
     assert @client.ws.open?
     assert_equal 'GET /ari/events?api_key=asterisk%3Aasterisk&app=dialplan HTTP/1.1', request.lines.first.chomp
 
     socket.write text_frame(MultiJson.dump(type: 'StasisStart', args: ['in'], channel: { id: '1794990944.1' }))
-    assert_equal ['in'], calls.pop(timeout: 5)
+    assert_equal ['in'], wait_for(calls)
   end
 
   def test_reconnect_closes_the_previous_websocket_quietly
@@ -62,14 +67,14 @@ class TestWebsocket < Minitest::Test
     server = Thread.new { accept_websocket }
     @client.connect_websocket
     previous, = server.value
-    assert opened.pop(timeout: 5)
+    assert wait_for(opened)
 
     server = Thread.new { accept_websocket }
     @client.connect_websocket
     server.value
     Timeout.timeout(5) { previous.read }
 
-    assert opened.pop(timeout: 5)
+    assert wait_for(opened)
     assert @client.ws.open?
     refute closed
   end
@@ -103,7 +108,7 @@ class TestWebsocket < Minitest::Test
     server = Thread.new { accept_websocket }
     @client.connect_websocket
     server.value
-    assert opened.pop(timeout: 5)
+    assert wait_for(opened)
     previous = @client.ws
     @server.close
 
