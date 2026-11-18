@@ -126,7 +126,7 @@ class TestWebsocket < Minitest::Test
     release << true
   end
 
-  def test_failed_reconnect_keeps_the_closed_previous_websocket
+  def test_failed_reconnect_leaves_no_websocket
     opened = Queue.new
     @client.on(:websocket_open) { opened << true }
     server = Thread.new { accept_websocket }
@@ -138,8 +138,34 @@ class TestWebsocket < Minitest::Test
 
     assert_raises(Errno::ECONNREFUSED) { @client.connect_websocket }
 
-    assert_same previous, @client.ws
+    assert_nil @client.ws
     refute previous.open?
+  ensure
+    @server = TCPServer.new('127.0.0.1', 0)
+  end
+
+  def test_close_that_hangs_is_ended_with_the_reader_thread
+    opened = Queue.new
+    release = Queue.new
+    @client.on(:websocket_open) { opened << true }
+    server = Thread.new { accept_websocket }
+    @client.connect_websocket
+    server.value
+    assert wait_for(opened)
+    previous = @client.ws
+    previous.define_singleton_method(:close) { release.pop }
+    @server.close
+    Timeout.timeout(5) { nil } # the timeout's own thread starts with its first use
+    threads = Thread.list
+
+    assert_raises(Errno::ECONNREFUSED) { Timeout.timeout(5) { @client.connect_websocket } }
+
+    assert_nil @client.ws
+    (Thread.list - threads + [previous.thread]).each { |thread| thread.join(5) }
+    refute previous.thread.alive?
+    assert_empty((Thread.list - threads).select(&:alive?))
+  ensure
+    3.times { release << true }
     @server = TCPServer.new('127.0.0.1', 0)
   end
 end
