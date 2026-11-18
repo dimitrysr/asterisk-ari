@@ -20,17 +20,19 @@ class TestWebsocket < Minitest::Test
 
   # Answers the upgrade request like Asterisk; returns the server end of the websocket and the request.
   def accept_websocket
-    socket = @server.accept
-    handshake = WebSocket::Handshake::Server.new
-    request = +''
-    until handshake.finished?
-      chunk = socket.readpartial(4096)
-      request << chunk
-      handshake << chunk
+    Timeout.timeout(5) do
+      socket = @server.accept
+      handshake = WebSocket::Handshake::Server.new
+      request = +''
+      until handshake.finished?
+        chunk = socket.readpartial(4096)
+        request << chunk
+        handshake << chunk
+      end
+      @protocol_version = handshake.version
+      socket.write handshake.to_s
+      [socket, request]
     end
-    @protocol_version = handshake.version
-    socket.write handshake.to_s
-    [socket, request]
   end
 
   # Queue#pop takes a timeout only from Ruby 3.2 on.
@@ -45,13 +47,13 @@ class TestWebsocket < Minitest::Test
   def test_connect_opens_the_events_websocket_and_passes_events_on
     opened = Queue.new
     calls = Queue.new
-    @client.on(:websocket_open) { opened << true }
+    @client.on(:websocket_open) { opened << ws }
     @client.on(:stasis_start) { |event| calls << event.args }
     server = Thread.new { accept_websocket }
     @client.connect_websocket
     socket, request = server.value
 
-    assert wait_for(opened)
+    assert_same @client.ws, wait_for(opened), 'websocket_open ran before #ws was the new websocket'
     assert @client.ws.open?
     assert_equal 'GET /ari/events?api_key=asterisk%3Aasterisk&app=dialplan HTTP/1.1', request.lines.first.chomp
 
@@ -102,6 +104,28 @@ class TestWebsocket < Minitest::Test
     assert_empty((Thread.list - threads).select(&:alive?))
   end
 
+  def test_reconnect_does_not_wait_for_a_close_that_hangs
+    opened = Queue.new
+    release = Queue.new
+    @client.on(:websocket_open) { opened << true }
+    server = Thread.new { accept_websocket }
+    @client.connect_websocket
+    server.value
+    assert wait_for(opened)
+    previous = @client.ws
+    previous.define_singleton_method(:close) { release.pop }
+
+    server = Thread.new { accept_websocket }
+    Timeout.timeout(5) { @client.connect_websocket }
+    server.value
+
+    assert wait_for(opened)
+    refute_same previous, @client.ws
+    assert @client.ws.open?
+  ensure
+    release << true
+  end
+
   def test_failed_reconnect_keeps_the_closed_previous_websocket
     opened = Queue.new
     @client.on(:websocket_open) { opened << true }
@@ -115,7 +139,7 @@ class TestWebsocket < Minitest::Test
     assert_raises(Errno::ECONNREFUSED) { @client.connect_websocket }
 
     assert_same previous, @client.ws
-    assert previous.closed?
+    refute previous.open?
     @server = TCPServer.new('127.0.0.1', 0)
   end
 end
