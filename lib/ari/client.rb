@@ -48,18 +48,29 @@ module Ari
       params = { api_key: @options[:api_key], app: @options[:app] }
       query_string = URI.encode_www_form params
       ws_url = "#{@uri}/events?#{query_string}"
-      if @ws
-        %w{ open message error close }.each { |e| @ws.remove_listener(e) }
-        @ws.close
+      close_websocket @ws
+      connecting = nil
+      # The listeners go on before the connect, so an upgrade answered at once cannot be missed.
+      @ws = WebSocket::Client::Simple.connect(ws_url) do |ws|
+        connecting = ws
+        ws.on :open,    &method(:handle_websocket_open)
+        ws.on :message, &method(:handle_websocket_message)
+        ws.on :error,   &method(:handle_websocket_error)
+        ws.on :close,   &method(:handle_websocket_close)
       end
-      @ws = WebSocket::Client::Simple.connect ws_url
-      @ws.on :open,    &method(:handle_websocket_open)
-      @ws.on :message, &method(:handle_websocket_message)
-      @ws.on :error,   &method(:handle_websocket_error)
-      @ws.on :close,   &method(:handle_websocket_close)
+    ensure
+      # websocket-client-simple starts its reader thread before it writes the upgrade request. A connect that
+      # fails or is interrupted after that would leave the thread and the socket behind, so close what it opened.
+      close_websocket connecting unless connecting.equal?(@ws)
     end
 
     private
+
+    def close_websocket(ws)
+      return unless ws
+      %w{ open message error close }.each { |e| ws.remove_listener(e) }
+      ws.close
+    end
 
     def handle_websocket_open
       self.emit :websocket_open
