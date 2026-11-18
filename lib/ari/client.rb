@@ -48,18 +48,48 @@ module Ari
       params = { api_key: @options[:api_key], app: @options[:app] }
       query_string = URI.encode_www_form params
       ws_url = "#{@uri}/events?#{query_string}"
-      if @ws
-        %w{ open message error close }.each { |e| @ws.remove_listener(e) }
-        @ws.close
+      # The previous websocket stops being #ws before anything else: after a failed connect there is none, and
+      # nobody writes to the one that was given up.
+      previous = @ws
+      @ws = nil
+      close_websocket previous
+      connected = false
+      WebSocket::Client::Simple.connect(ws_url) do |ws|
+        # Set before a listener can fire, so that a handler of websocket_open already finds the websocket in #ws.
+        # The listeners go on before the connect, so an upgrade answered at once cannot be missed.
+        @ws = ws
+        ws.on :open,    &method(:handle_websocket_open)
+        ws.on :message, &method(:handle_websocket_message)
+        ws.on :error,   &method(:handle_websocket_error)
+        ws.on :close,   &method(:handle_websocket_close)
       end
-      @ws = WebSocket::Client::Simple.connect ws_url
-      @ws.on :open,    &method(:handle_websocket_open)
-      @ws.on :message, &method(:handle_websocket_message)
-      @ws.on :error,   &method(:handle_websocket_error)
-      @ws.on :close,   &method(:handle_websocket_close)
+      connected = true
+      @ws
+    ensure
+      # websocket-client-simple starts its reader thread before it writes the upgrade request. A connect that
+      # fails or is interrupted after that would leave the thread and the socket behind, so close what it opened.
+      unless connected
+        failed = @ws
+        @ws = nil
+        close_websocket failed
+      end
     end
 
     private
+
+    WEBSOCKET_CLOSE_TIMEOUT = 1
+
+    def close_websocket(ws)
+      return unless ws
+      %w{ open message error close }.each { |e| ws.remove_listener(e) }
+      # A dead peer can block the close frame or the TLS shutdown. The caller has to get on with its next
+      # connect, so the close gets a thread of its own and a time limit; past it, that thread and the
+      # websocket's reader are ended.
+      closing = Thread.new { ws.close }
+      return if closing.join(WEBSOCKET_CLOSE_TIMEOUT)
+      closing.kill
+      ws.thread&.kill
+    end
 
     def handle_websocket_open
       self.emit :websocket_open
